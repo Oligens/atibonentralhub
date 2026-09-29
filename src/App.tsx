@@ -26,6 +26,23 @@ interface ScanStats {
   standby: number;
 }
 
+interface DomainAnalysis {
+  domain: string;
+  ip: string | null;
+  dnsRecords: { type: string; value: string; ttl: number }[];
+  httpStatus: number | null;
+  responseTime: number | null;
+  isReachable: boolean;
+  geoLocation: {
+    country: string;
+    city: string;
+    isp: string;
+    lat: number;
+    lon: number;
+  } | null;
+  analyzedAt: string;
+}
+
 // ============================================================
 // NETWORK SCAN ENGINE (Simulated for Browser Environment)
 // ============================================================
@@ -120,6 +137,97 @@ function generateHosts(count: number): NetworkHost[] {
     }
     return 0;
   });
+}
+
+// ============================================================
+// DOMAIN ANALYSIS ENGINE (Real API Integration)
+// ============================================================
+
+async function analyzeDomain(domain: string): Promise<DomainAnalysis> {
+  const result: DomainAnalysis = {
+    domain,
+    ip: null,
+    dnsRecords: [],
+    httpStatus: null,
+    responseTime: null,
+    isReachable: false,
+    geoLocation: null,
+    analyzedAt: new Date().toISOString(),
+  };
+
+  try {
+    // Clean domain input
+    let cleanDomain = domain.trim().toLowerCase();
+    cleanDomain = cleanDomain.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    
+    // DNS Resolution via Google DNS over HTTPS
+    const dnsResponse = await fetch(`https://dns.google/resolve?name=${cleanDomain}&type=A`);
+    const dnsData = await dnsResponse.json();
+    
+    if (dnsData.Answer && dnsData.Answer.length > 0) {
+      const aRecords = dnsData.Answer.filter((r: any) => r.type === 1);
+      if (aRecords.length > 0) {
+        result.ip = aRecords[0].data;
+        
+        // Collect all DNS records
+        dnsData.Answer.forEach((record: any) => {
+          const typeNames: Record<number, string> = {
+            1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 15: 'MX', 16: 'TXT', 28: 'AAAA'
+          };
+          result.dnsRecords.push({
+            type: typeNames[record.type] || `TYPE${record.type}`,
+            value: record.data,
+            ttl: record.TTL || 0,
+          });
+        });
+
+        // Get geolocation of IP
+        try {
+          const geoResponse = await fetch(`http://ip-api.com/json/${result.ip}?fields=status,country,city,isp,lat,lon`);
+          const geoData = await geoResponse.json();
+          if (geoData.status === 'success') {
+            result.geoLocation = {
+              country: geoData.country,
+              city: geoData.city,
+              isp: geoData.isp,
+              lat: geoData.lat,
+              lon: geoData.lon,
+            };
+          }
+        } catch (e) {
+          // Geo lookup failed, continue without it
+        }
+
+        // Check HTTP status
+        try {
+          const startTime = Date.now();
+          const httpUrl = `https://${cleanDomain}`;
+          const response = await fetch(httpUrl, { method: 'HEAD', mode: 'no-cors' });
+          const endTime = Date.now();
+          result.responseTime = endTime - startTime;
+          result.isReachable = true;
+          result.httpStatus = response.type === 'opaque' ? 200 : response.status;
+        } catch (e) {
+          // Try HTTP if HTTPS fails
+          try {
+            const startTime = Date.now();
+            const httpUrl = `http://${cleanDomain}`;
+            const response = await fetch(httpUrl, { method: 'HEAD', mode: 'no-cors' });
+            const endTime = Date.now();
+            result.responseTime = endTime - startTime;
+            result.isReachable = true;
+            result.httpStatus = response.type === 'opaque' ? 200 : response.status;
+          } catch (e2) {
+            result.isReachable = false;
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Domain analysis error:', error);
+  }
+
+  return result;
 }
 
 // ============================================================
@@ -286,11 +394,116 @@ function HostRow({ host, onToggle, onRegister }: {
   );
 }
 
+function DomainAnalysisCard({ analysis }: { analysis: DomainAnalysis }) {
+  return (
+    <div className="bg-gray-800/30 rounded-xl border border-gray-700/50 p-6 space-y-4 fade-in">
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h4 className="text-lg font-bold text-white flex items-center gap-2">
+            <i className="fas fa-globe text-cyan-400"></i>
+            {analysis.domain}
+          </h4>
+          <p className="text-xs text-gray-500 mt-1">
+            Analysé le {new Date(analysis.analyzedAt).toLocaleString('fr-FR')}
+          </p>
+        </div>
+        <div className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+          analysis.isReachable 
+            ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/50' 
+            : 'bg-red-900/40 text-red-400 border border-red-700/50'
+        }`}>
+          <i className={`fas fa-${analysis.isReachable ? 'check-circle' : 'times-circle'} mr-1`}></i>
+          {analysis.isReachable ? 'ACCESSIBLE' : 'INACCESSIBLE'}
+        </div>
+      </div>
+
+      {/* IP & Status */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-700/30">
+          <p className="text-xs text-gray-400 mb-1">Adresse IP</p>
+          <p className="text-lg font-mono font-bold text-cyan-300">
+            {analysis.ip || 'N/A'}
+          </p>
+        </div>
+        <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-700/30">
+          <p className="text-xs text-gray-400 mb-1">Statut HTTP</p>
+          <p className="text-lg font-mono font-bold text-white">
+            {analysis.httpStatus || 'N/A'}
+          </p>
+        </div>
+        <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-700/30">
+          <p className="text-xs text-gray-400 mb-1">Temps de Réponse</p>
+          <p className="text-lg font-mono font-bold text-emerald-400">
+            {analysis.responseTime ? `${analysis.responseTime}ms` : 'N/A'}
+          </p>
+        </div>
+      </div>
+
+      {/* Geolocation */}
+      {analysis.geoLocation && (
+        <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-700/30">
+          <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+            <i className="fas fa-map-marker-alt text-purple-400"></i>
+            Géolocalisation
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div>
+              <p className="text-gray-500 text-xs">Pays</p>
+              <p className="text-white font-medium">{analysis.geoLocation.country}</p>
+            </div>
+            <div>
+              <p className="text-gray-500 text-xs">Ville</p>
+              <p className="text-white font-medium">{analysis.geoLocation.city}</p>
+            </div>
+            <div>
+              <p className="text-gray-500 text-xs">FAI</p>
+              <p className="text-white font-medium truncate">{analysis.geoLocation.isp}</p>
+            </div>
+            <div>
+              <p className="text-gray-500 text-xs">Coordonnées</p>
+              <p className="text-white font-mono text-xs">
+                {analysis.geoLocation.lat.toFixed(4)}, {analysis.geoLocation.lon.toFixed(4)}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DNS Records */}
+      {analysis.dnsRecords.length > 0 && (
+        <div className="bg-gray-900/50 rounded-lg p-4 border border-gray-700/30">
+          <p className="text-xs text-gray-400 mb-3 flex items-center gap-1">
+            <i className="fas fa-server text-cyan-400"></i>
+            Enregistrements DNS ({analysis.dnsRecords.length})
+          </p>
+          <div className="space-y-2 max-h-48 overflow-y-auto">
+            {analysis.dnsRecords.map((record, idx) => (
+              <div key={idx} className="flex items-center justify-between text-sm bg-gray-800/50 rounded px-3 py-2">
+                <span className="font-mono text-xs bg-cyan-900/30 text-cyan-300 px-2 py-0.5 rounded">
+                  {record.type}
+                </span>
+                <span className="text-gray-300 font-mono text-xs flex-1 mx-3 truncate">
+                  {record.value}
+                </span>
+                <span className="text-gray-500 text-xs">
+                  TTL: {record.ttl}s
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================
 // MAIN APPLICATION
 // ============================================================
 
 export default function App() {
+  // Module 1: LAN Scanner State
   const [hosts, setHosts] = useState<NetworkHost[]>([]);
   const [registeredHosts, setRegisteredHosts] = useState<NetworkHost[]>([]);
   const [isScanning, setIsScanning] = useState(false);
@@ -298,10 +511,19 @@ export default function App() {
   const [scanPhase, setScanPhase] = useState('');
   const [scanComplete, setScanComplete] = useState(false);
   const [stats, setStats] = useState<ScanStats>({ totalScanned: 0, active: 0, compromised: 0, standby: 0 });
-  const [currentTime, setCurrentTime] = useState(new Date());
   const [filter, setFilter] = useState<'all' | 'active' | 'compromised' | 'standby'>('all');
   const [showRegistered, setShowRegistered] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Module 2: Domain Analyzer State
+  const [domainInput, setDomainInput] = useState('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [domainAnalysis, setDomainAnalysis] = useState<DomainAnalysis | null>(null);
+  const [analysisHistory, setAnalysisHistory] = useState<DomainAnalysis[]>([]);
+
+  // Common state
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [activeModule, setActiveModule] = useState<'lan' | 'domain'>('lan');
 
   // Clock update
   useEffect(() => {
@@ -319,6 +541,7 @@ export default function App() {
     });
   }, [hosts]);
 
+  // Module 1: LAN Scanner Functions
   const startScan = useCallback(() => {
     setIsScanning(true);
     setScanProgress(0);
@@ -389,6 +612,24 @@ export default function App() {
     deselectAll();
   }, [hosts, registeredHosts, deselectAll]);
 
+  // Module 2: Domain Analyzer Functions
+  const analyzeDomainHandler = useCallback(async () => {
+    if (!domainInput.trim()) return;
+
+    setIsAnalyzing(true);
+    setDomainAnalysis(null);
+
+    try {
+      const result = await analyzeDomain(domainInput);
+      setDomainAnalysis(result);
+      setAnalysisHistory(prev => [result, ...prev].slice(0, 5)); // Keep last 5
+    } catch (error) {
+      console.error('Analysis failed:', error);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [domainInput]);
+
   const filteredHosts = hosts.filter(h => filter === 'all' || h.status === filter);
 
   return (
@@ -438,228 +679,396 @@ export default function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* Stats Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard
-            title="Total Scanné"
-            value={stats.totalScanned}
-            icon="fa-network-wired"
-            color="text-cyan-400"
-            glow="hover:glow-cyan"
-          />
-          <StatCard
-            title="Hôtes Actifs"
-            value={stats.active}
-            icon="fa-circle-check"
-            color="text-emerald-400"
-            glow="hover:glow-green"
-          />
-          <StatCard
-            title="Compromis"
-            value={stats.compromised}
-            icon="fa-skull-crossbones"
-            color="text-red-400"
-            glow="hover:glow-red"
-          />
-          <StatCard
-            title="En Standby"
-            value={stats.standby}
-            icon="fa-pause-circle"
-            color="text-purple-400"
-            glow="hover:glow-purple"
-          />
+        {/* Module Selector Tabs */}
+        <div className="flex items-center gap-2 bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 p-2">
+          <button
+            onClick={() => setActiveModule('lan')}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium text-sm transition-all ${
+              activeModule === 'lan'
+                ? 'bg-gradient-to-r from-cyan-600/30 to-blue-600/30 text-cyan-300 border border-cyan-600/50 glow-cyan'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+            }`}
+          >
+            <i className="fas fa-network-wired"></i>
+            <span>Module 1: Scanner LAN</span>
+          </button>
+          <button
+            onClick={() => setActiveModule('domain')}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium text-sm transition-all ${
+              activeModule === 'domain'
+                ? 'bg-gradient-to-r from-purple-600/30 to-pink-600/30 text-purple-300 border border-purple-600/50 glow-purple'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+            }`}
+          >
+            <i className="fas fa-globe"></i>
+            <span>Module 2: Analyseur de Cible</span>
+          </button>
         </div>
 
-        {/* Control Panel */}
-        <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 p-6">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <i className="fas fa-radar text-cyan-400"></i>
-                Panneau de Contrôle
-              </h2>
-              <p className="text-sm text-gray-400 mt-1">
-                Lancez un scan complet du réseau local pour découvrir les hôtes actifs.
-              </p>
-            </div>
-
-            <button
-              onClick={startScan}
-              disabled={isScanning}
-              className={`relative group px-6 py-3 rounded-xl font-bold text-sm uppercase tracking-wider transition-all duration-300 ${
-                isScanning
-                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
-                  : 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-400 hover:to-blue-500 glow-cyan hover:scale-105 active:scale-95'
-              }`}
-            >
-              {isScanning ? (
-                <span className="flex items-center gap-2">
-                  <i className="fas fa-spinner fa-spin"></i>
-                  Scan en cours...
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  <i className="fas fa-search-location text-lg"></i>
-                  🔍 LANCER LE SCAN RÉSEAU
-                </span>
-              )}
-              {!isScanning && (
-                <div className="absolute inset-0 rounded-xl bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-              )}
-            </button>
-          </div>
-
-          {/* Scan Progress */}
-          {isScanning && (
-            <ScanProgress progress={scanProgress} phase={scanPhase} />
-          )}
-        </div>
-
-        {/* Registered Hosts Panel */}
-        {showRegistered && registeredHosts.length > 0 && (
-          <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-cyan-800/30 p-6 slide-up">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-md font-bold text-cyan-300 flex items-center gap-2">
-                <i className="fas fa-bookmark"></i>
-                Hôtes Enregistrés dans la Passerelle
-              </h3>
-              <button
-                onClick={() => setShowRegistered(false)}
-                className="text-gray-400 hover:text-white transition-colors"
-              >
-                <i className="fas fa-times"></i>
-              </button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {registeredHosts.map(host => (
-                <div key={host.id} className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50 flex items-center gap-3">
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                    host.status === 'compromised' ? 'bg-red-900/40 text-red-400' :
-                    host.status === 'active' ? 'bg-emerald-900/40 text-emerald-400' :
-                    'bg-gray-700/50 text-gray-400'
-                  }`}>
-                    <i className="fas fa-server text-sm"></i>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{host.hostname}</p>
-                    <p className="text-xs text-gray-400 font-mono">{host.ip}</p>
-                  </div>
-                  <StatusBadge status={host.status} />
-                </div>
-              ))}
-            </div>
+        {/* Stats Cards (Module 1) */}
+        {activeModule === 'lan' && (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard
+              title="Total Scanné"
+              value={stats.totalScanned}
+              icon="fa-network-wired"
+              color="text-cyan-400"
+              glow="hover:glow-cyan"
+            />
+            <StatCard
+              title="Hôtes Actifs"
+              value={stats.active}
+              icon="fa-circle-check"
+              color="text-emerald-400"
+              glow="hover:glow-green"
+            />
+            <StatCard
+              title="Compromis"
+              value={stats.compromised}
+              icon="fa-skull-crossbones"
+              color="text-red-400"
+              glow="hover:glow-red"
+            />
+            <StatCard
+              title="En Standby"
+              value={stats.standby}
+              icon="fa-pause-circle"
+              color="text-purple-400"
+              glow="hover:glow-purple"
+            />
           </div>
         )}
 
-        {/* Results Table */}
-        {scanComplete && hosts.length > 0 && (
-          <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 overflow-hidden fade-in">
-            {/* Table Header */}
-            <div className="p-4 border-b border-gray-800/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <h3 className="text-md font-bold text-white flex items-center gap-2">
-                  <i className="fas fa-list-ul text-cyan-400"></i>
-                  Cibles Découvertes
-                </h3>
-                <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">
-                  {filteredHosts.length} résultat{filteredHosts.length > 1 ? 's' : ''}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2 flex-wrap">
-                {/* Filters */}
-                <div className="flex items-center gap-1 bg-gray-800/50 rounded-lg p-1 border border-gray-700/50">
-                  {(['all', 'active', 'compromised', 'standby'] as const).map(f => (
-                    <button
-                      key={f}
-                      onClick={() => setFilter(f)}
-                      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                        filter === f
-                          ? 'bg-cyan-600/30 text-cyan-300 border border-cyan-600/50'
-                          : 'text-gray-400 hover:text-gray-200'
-                      }`}
-                    >
-                      {f === 'all' ? 'Tous' : f === 'active' ? 'Actifs' : f === 'compromised' ? 'Compromis' : 'Standby'}
-                    </button>
-                  ))}
+        {/* Module 1: LAN Scanner */}
+        {activeModule === 'lan' && (
+          <>
+            {/* Control Panel */}
+            <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 p-6">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                    <i className="fas fa-radar text-cyan-400"></i>
+                    Panneau de Contrôle - Scan Réseau
+                  </h2>
+                  <p className="text-sm text-gray-400 mt-1">
+                    Lancez un scan complet du réseau local pour découvrir les hôtes actifs.
+                  </p>
                 </div>
 
-                <button onClick={selectAll} className="text-xs text-gray-400 hover:text-cyan-300 px-2 py-1 transition-colors">
-                  <i className="fas fa-check-double mr-1"></i>Tout sélectionner
+                <button
+                  onClick={startScan}
+                  disabled={isScanning}
+                  className={`relative group px-6 py-3 rounded-xl font-bold text-sm uppercase tracking-wider transition-all duration-300 ${
+                    isScanning
+                      ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                      : 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-400 hover:to-blue-500 glow-cyan hover:scale-105 active:scale-95'
+                  }`}
+                >
+                  {isScanning ? (
+                    <span className="flex items-center gap-2">
+                      <i className="fas fa-spinner fa-spin"></i>
+                      Scan en cours...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-2">
+                      <i className="fas fa-search-location text-lg"></i>
+                      🔍 SCANNER LE LAN
+                    </span>
+                  )}
+                  {!isScanning && (
+                    <div className="absolute inset-0 rounded-xl bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                  )}
                 </button>
-                <button onClick={deselectAll} className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1 transition-colors">
-                  <i className="fas fa-times mr-1"></i>Désélectionner
-                </button>
-
-                {hosts.filter(h => h.selected).length > 0 && (
-                  <button
-                    onClick={registerSelected}
-                    className="text-xs bg-cyan-600/20 text-cyan-400 border border-cyan-700/50 px-3 py-1.5 rounded-lg hover:bg-cyan-600/30 transition-colors font-medium"
-                  >
-                    <i className="fas fa-plus-circle mr-1"></i>
-                    Enregistrer ({hosts.filter(h => h.selected).length})
-                  </button>
-                )}
               </div>
+
+              {/* Scan Progress */}
+              {isScanning && (
+                <ScanProgress progress={scanProgress} phase={scanPhase} />
+              )}
             </div>
 
-            {/* Table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead>
-                  <tr className="bg-gray-800/30 text-xs uppercase tracking-wider text-gray-400">
-                    <th className="px-4 py-3 w-10"></th>
-                    <th className="px-4 py-3">Endpoint</th>
-                    <th className="px-4 py-3">Hostname</th>
-                    <th className="px-4 py-3">MAC</th>
-                    <th className="px-4 py-3">Statut</th>
-                    <th className="px-4 py-3">Risque</th>
-                    <th className="px-4 py-3">OS</th>
-                    <th className="px-4 py-3">Ports</th>
-                    <th className="px-4 py-3">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredHosts.map((host, idx) => (
-                    <HostRow
-                      key={host.id}
-                      host={host}
-                      onToggle={toggleHost}
-                      onRegister={registerHost}
-                    />
+            {/* Registered Hosts Panel */}
+            {showRegistered && registeredHosts.length > 0 && (
+              <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-cyan-800/30 p-6 slide-up">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-md font-bold text-cyan-300 flex items-center gap-2">
+                    <i className="fas fa-bookmark"></i>
+                    Hôtes Enregistrés dans la Passerelle
+                  </h3>
+                  <button
+                    onClick={() => setShowRegistered(false)}
+                    className="text-gray-400 hover:text-white transition-colors"
+                  >
+                    <i className="fas fa-times"></i>
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {registeredHosts.map(host => (
+                    <div key={host.id} className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50 flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                        host.status === 'compromised' ? 'bg-red-900/40 text-red-400' :
+                        host.status === 'active' ? 'bg-emerald-900/40 text-emerald-400' :
+                        'bg-gray-700/50 text-gray-400'
+                      }`}>
+                        <i className="fas fa-server text-sm"></i>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white truncate">{host.hostname}</p>
+                        <p className="text-xs text-gray-400 font-mono">{host.ip}</p>
+                      </div>
+                      <StatusBadge status={host.status} />
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
-
-            {filteredHosts.length === 0 && (
-              <div className="text-center py-12 text-gray-500">
-                <i className="fas fa-ghost text-4xl mb-3 opacity-30"></i>
-                <p>Aucun hôte ne correspond au filtre sélectionné.</p>
+                </div>
               </div>
             )}
-          </div>
+
+            {/* Results Table */}
+            {scanComplete && hosts.length > 0 && (
+              <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 overflow-hidden fade-in">
+                {/* Table Header */}
+                <div className="p-4 border-b border-gray-800/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-md font-bold text-white flex items-center gap-2">
+                      <i className="fas fa-list-ul text-cyan-400"></i>
+                      Cibles Découvertes
+                    </h3>
+                    <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">
+                      {filteredHosts.length} résultat{filteredHosts.length > 1 ? 's' : ''}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Filters */}
+                    <div className="flex items-center gap-1 bg-gray-800/50 rounded-lg p-1 border border-gray-700/50">
+                      {(['all', 'active', 'compromised', 'standby'] as const).map(f => (
+                        <button
+                          key={f}
+                          onClick={() => setFilter(f)}
+                          className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                            filter === f
+                              ? 'bg-cyan-600/30 text-cyan-300 border border-cyan-600/50'
+                              : 'text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          {f === 'all' ? 'Tous' : f === 'active' ? 'Actifs' : f === 'compromised' ? 'Compromis' : 'Standby'}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button onClick={selectAll} className="text-xs text-gray-400 hover:text-cyan-300 px-2 py-1 transition-colors">
+                      <i className="fas fa-check-double mr-1"></i>Tout sélectionner
+                    </button>
+                    <button onClick={deselectAll} className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1 transition-colors">
+                      <i className="fas fa-times mr-1"></i>Désélectionner
+                    </button>
+
+                    {hosts.filter(h => h.selected).length > 0 && (
+                      <button
+                        onClick={registerSelected}
+                        className="text-xs bg-cyan-600/20 text-cyan-400 border border-cyan-700/50 px-3 py-1.5 rounded-lg hover:bg-cyan-600/30 transition-colors font-medium"
+                      >
+                        <i className="fas fa-plus-circle mr-1"></i>
+                        Enregistrer ({hosts.filter(h => h.selected).length})
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Table */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-gray-800/30 text-xs uppercase tracking-wider text-gray-400">
+                        <th className="px-4 py-3 w-10"></th>
+                        <th className="px-4 py-3">Endpoint</th>
+                        <th className="px-4 py-3">Hostname</th>
+                        <th className="px-4 py-3">MAC</th>
+                        <th className="px-4 py-3">Statut</th>
+                        <th className="px-4 py-3">Risque</th>
+                        <th className="px-4 py-3">OS</th>
+                        <th className="px-4 py-3">Ports</th>
+                        <th className="px-4 py-3">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredHosts.map((host) => (
+                        <HostRow
+                          key={host.id}
+                          host={host}
+                          onToggle={toggleHost}
+                          onRegister={registerHost}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {filteredHosts.length === 0 && (
+                  <div className="text-center py-12 text-gray-500">
+                    <i className="fas fa-ghost text-4xl mb-3 opacity-30"></i>
+                    <p>Aucun hôte ne correspond au filtre sélectionné.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Empty State */}
+            {!isScanning && !scanComplete && (
+              <div className="text-center py-16 fade-in">
+                <div className="relative inline-block mb-6">
+                  <div className="w-24 h-24 rounded-full bg-gray-800/50 border border-gray-700/50 flex items-center justify-center">
+                    <i className="fas fa-shield-halved text-4xl text-gray-600"></i>
+                  </div>
+                  <div className="absolute inset-0 rounded-full border border-cyan-500/20 animate-ping"></div>
+                </div>
+                <h3 className="text-xl font-bold text-gray-300 mb-2">Aucun Scan Effectué</h3>
+                <p className="text-gray-500 text-sm max-w-md mx-auto">
+                  Cliquez sur le bouton "SCANNER LE LAN" pour découvrir les hôtes actifs sur votre réseau local.
+                </p>
+                <div className="mt-6 flex items-center justify-center gap-4 text-xs text-gray-600">
+                  <span className="flex items-center gap-1"><i className="fas fa-lock"></i> Chiffré</span>
+                  <span className="flex items-center gap-1"><i className="fas fa-bolt"></i> Temps réel</span>
+                  <span className="flex items-center gap-1"><i className="fas fa-eye"></i> Monitoring</span>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
-        {/* Empty State */}
-        {!isScanning && !scanComplete && (
-          <div className="text-center py-16 fade-in">
-            <div className="relative inline-block mb-6">
-              <div className="w-24 h-24 rounded-full bg-gray-800/50 border border-gray-700/50 flex items-center justify-center">
-                <i className="fas fa-shield-halved text-4xl text-gray-600"></i>
+        {/* Module 2: Domain Analyzer */}
+        {activeModule === 'domain' && (
+          <>
+            {/* Control Panel */}
+            <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <i className="fas fa-satellite text-purple-400"></i>
+                  Analyseur de Cible Distante - OSINT
+                </h2>
+                <p className="text-sm text-gray-400 mt-1">
+                  Entrez un domaine ou une URL pour effectuer une analyse DNS, géolocalisation et vérification de statut.
+                </p>
               </div>
-              <div className="absolute inset-0 rounded-full border border-cyan-500/20 animate-ping"></div>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <div className="flex-1 relative">
+                  <input
+                    type="text"
+                    value={domainInput}
+                    onChange={(e) => setDomainInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && analyzeDomainHandler()}
+                    placeholder="Ex: fosref.ht, google.com, example.org"
+                    className="w-full bg-gray-900/50 border border-gray-700/50 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500/50 focus:ring-2 focus:ring-purple-500/20 transition-all"
+                    disabled={isAnalyzing}
+                  />
+                  <i className="fas fa-globe absolute right-4 top-1/2 -translate-y-1/2 text-gray-600"></i>
+                </div>
+                <button
+                  onClick={analyzeDomainHandler}
+                  disabled={isAnalyzing || !domainInput.trim()}
+                  className={`px-6 py-3 rounded-lg font-bold text-sm uppercase tracking-wider transition-all duration-300 flex items-center gap-2 ${
+                    isAnalyzing || !domainInput.trim()
+                      ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                      : 'bg-gradient-to-r from-purple-500 to-pink-600 text-white hover:from-purple-400 hover:to-pink-500 glow-purple hover:scale-105 active:scale-95'
+                  }`}
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <i className="fas fa-spinner fa-spin"></i>
+                      Analyse...
+                    </>
+                  ) : (
+                    <>
+                      <i className="fas fa-rocket text-lg"></i>
+                      🚀 ANALYSER LA CIBLE
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Analysis Progress */}
+              {isAnalyzing && (
+                <div className="mt-6 fade-in">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="relative">
+                      <i className="fas fa-radar text-purple-400 text-2xl"></i>
+                      <div className="absolute inset-0 animate-ping">
+                        <i className="fas fa-radar text-purple-400/30 text-2xl"></i>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-purple-300">Analyse en cours...</p>
+                      <p className="text-xs text-gray-500">Résolution DNS, vérification HTTP, géolocalisation</p>
+                    </div>
+                  </div>
+                  <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-purple-500 via-pink-500 to-red-500 rounded-full animate-pulse" style={{ width: '100%' }}></div>
+                  </div>
+                </div>
+              )}
             </div>
-            <h3 className="text-xl font-bold text-gray-300 mb-2">Aucun Scan Effectué</h3>
-            <p className="text-gray-500 text-sm max-w-md mx-auto">
-              Cliquez sur le bouton "LANCER LE SCAN RÉSEAU" pour découvrir les hôtes actifs sur votre réseau local.
-            </p>
-            <div className="mt-6 flex items-center justify-center gap-4 text-xs text-gray-600">
-              <span className="flex items-center gap-1"><i className="fas fa-lock"></i> Chiffré</span>
-              <span className="flex items-center gap-1"><i className="fas fa-bolt"></i> Temps réel</span>
-              <span className="flex items-center gap-1"><i className="fas fa-eye"></i> Monitoring</span>
-            </div>
-          </div>
+
+            {/* Analysis Results */}
+            {domainAnalysis && (
+              <div className="space-y-4 fade-in">
+                <DomainAnalysisCard analysis={domainAnalysis} />
+              </div>
+            )}
+
+            {/* Analysis History */}
+            {analysisHistory.length > 1 && (
+              <div className="bg-[#111827]/80 backdrop-blur-sm rounded-xl border border-gray-800/50 p-6">
+                <h3 className="text-md font-bold text-white flex items-center gap-2 mb-4">
+                  <i className="fas fa-history text-gray-400"></i>
+                  Historique des Analyses
+                </h3>
+                <div className="space-y-2">
+                  {analysisHistory.slice(1).map((item, idx) => (
+                    <div
+                      key={idx}
+                      onClick={() => setDomainAnalysis(item)}
+                      className="flex items-center justify-between bg-gray-800/30 rounded-lg p-3 border border-gray-700/30 hover:bg-gray-800/50 cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <i className="fas fa-globe text-gray-500"></i>
+                        <span className="text-sm text-white">{item.domain}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <code className="text-xs text-cyan-400 font-mono">{item.ip || 'N/A'}</code>
+                        <span className={`text-xs px-2 py-0.5 rounded ${
+                          item.isReachable ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'
+                        }`}>
+                          {item.isReachable ? '✓' : '✗'}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Empty State */}
+            {!domainAnalysis && !isAnalyzing && (
+              <div className="text-center py-16 fade-in">
+                <div className="relative inline-block mb-6">
+                  <div className="w-24 h-24 rounded-full bg-gray-800/50 border border-gray-700/50 flex items-center justify-center">
+                    <i className="fas fa-satellite-dish text-4xl text-gray-600"></i>
+                  </div>
+                  <div className="absolute inset-0 rounded-full border border-purple-500/20 animate-ping"></div>
+                </div>
+                <h3 className="text-xl font-bold text-gray-300 mb-2">Aucune Analyse Effectuée</h3>
+                <p className="text-gray-500 text-sm max-w-md mx-auto">
+                  Entrez un domaine ou une URL ci-dessus pour lancer une analyse OSINT complète.
+                </p>
+                <div className="mt-6 flex items-center justify-center gap-4 text-xs text-gray-600">
+                  <span className="flex items-center gap-1"><i className="fas fa-search"></i> DNS Lookup</span>
+                  <span className="flex items-center gap-1"><i className="fas fa-map-marker-alt"></i> Géolocalisation</span>
+                  <span className="flex items-center gap-1"><i className="fas fa-check-circle"></i> Status Check</span>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </main>
 
