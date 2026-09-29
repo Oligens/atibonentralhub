@@ -17,6 +17,7 @@ interface NetworkHost {
   lastSeen: string;
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   selected: boolean;
+  isManual?: boolean;
 }
 
 interface ScanStats {
@@ -137,6 +138,65 @@ function generateHosts(count: number): NetworkHost[] {
     }
     return 0;
   });
+}
+
+// ============================================================
+// MANUAL IP PROBE ENGINE
+// ============================================================
+
+async function probeSpecificIP(ip: string): Promise<NetworkHost> {
+  // Simulate ping/connectivity test
+  await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1200));
+
+  // Determine status based on connectivity simulation
+  const statusRoll = Math.random();
+  let status: HostStatus;
+  let riskLevel: NetworkHost['riskLevel'];
+
+  if (statusRoll < 0.1) {
+    status = 'compromised';
+    riskLevel = 'high';
+  } else if (statusRoll < 0.7) {
+    status = 'active';
+    riskLevel = Math.random() > 0.6 ? 'medium' : 'low';
+  } else {
+    status = 'standby';
+    riskLevel = 'low';
+  }
+
+  // Generate random ports for this IP
+  const portCount = Math.floor(Math.random() * 4) + 1;
+  const ports: number[] = [];
+  for (let p = 0; p < portCount; p++) {
+    const port = COMMON_PORTS[Math.floor(Math.random() * COMMON_PORTS.length)];
+    if (!ports.includes(port)) ports.push(port);
+  }
+
+  // Try to resolve hostname via reverse DNS (simulated)
+  const hostnamePrefixes = ['HOST', 'SRV', 'WS', 'NODE', 'DEV', 'PROD', 'TEST'];
+  const hostname = `${hostnamePrefixes[Math.floor(Math.random() * hostnamePrefixes.length)]}-${Math.floor(Math.random() * 99).toString().padStart(2, '0')}`;
+
+  return {
+    id: generateUUID(),
+    ip,
+    hostname,
+    mac: generateMAC(),
+    status,
+    os: OS_TYPES[Math.floor(Math.random() * OS_TYPES.length)],
+    ports: ports.sort((a, b) => a - b),
+    lastSeen: new Date().toISOString(),
+    riskLevel,
+    selected: false,
+    isManual: true,
+  };
+}
+
+function isValidIP(ip: string): boolean {
+  const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+  if (!ipRegex.test(ip)) return false;
+  
+  const parts = ip.split('.').map(Number);
+  return parts.every(part => part >= 0 && part <= 255);
 }
 
 // ============================================================
@@ -345,7 +405,10 @@ function HostRow({ host, onToggle, onRegister }: {
   onRegister: (host: NetworkHost) => void;
 }) {
   return (
-    <tr className={`border-b border-gray-800/50 transition-all duration-200 hover:bg-gray-800/30 ${host.selected ? 'bg-cyan-900/10 border-l-2 border-l-cyan-400' : ''}`}>
+    <tr className={`border-b border-gray-800/50 transition-all duration-200 hover:bg-gray-800/30 ${
+      host.isManual ? 'bg-orange-900/10 border-l-2 border-l-orange-400' : 
+      host.selected ? 'bg-cyan-900/10 border-l-2 border-l-cyan-400' : ''
+    }`}>
       <td className="px-4 py-3">
         <input
           type="checkbox"
@@ -355,10 +418,20 @@ function HostRow({ host, onToggle, onRegister }: {
         />
       </td>
       <td className="px-4 py-3">
-        <code className="text-cyan-300 font-mono text-sm bg-cyan-900/20 px-2 py-0.5 rounded">{host.ip}</code>
+        <code className={`font-mono text-sm px-2 py-0.5 rounded ${
+          host.isManual ? 'text-orange-300 bg-orange-900/20' : 'text-cyan-300 bg-cyan-900/20'
+        }`}>{host.ip}</code>
       </td>
       <td className="px-4 py-3">
-        <span className="text-gray-200 font-medium text-sm">{host.hostname}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-gray-200 font-medium text-sm">{host.hostname}</span>
+          {host.isManual && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-orange-900/40 text-orange-400 border border-orange-700/50">
+              <i className="fas fa-crosshairs text-[10px]"></i>
+              MANUEL
+            </span>
+          )}
+        </div>
       </td>
       <td className="px-4 py-3">
         <code className="text-gray-400 font-mono text-xs">{host.mac}</code>
@@ -525,6 +598,11 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [activeModule, setActiveModule] = useState<'lan' | 'domain'>('lan');
 
+  // Manual IP Injection State
+  const [manualIP, setManualIP] = useState('');
+  const [isProbing, setIsProbing] = useState(false);
+  const [probeError, setProbeError] = useState('');
+
   // Clock update
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -611,6 +689,47 @@ export default function App() {
     setRegisteredHosts(prev => [...prev, ...newRegistered]);
     deselectAll();
   }, [hosts, registeredHosts, deselectAll]);
+
+  // Manual IP Probe Function
+  const probeManualIP = useCallback(async () => {
+    if (!manualIP.trim()) {
+      setProbeError('Veuillez entrer une adresse IP valide.');
+      return;
+    }
+
+    const trimmedIP = manualIP.trim();
+    
+    if (!isValidIP(trimmedIP)) {
+      setProbeError('Format d\'adresse IP invalide. Ex: 192.168.1.50');
+      return;
+    }
+
+    setProbeError('');
+    setIsProbing(true);
+
+    try {
+      const probedHost = await probeSpecificIP(trimmedIP);
+      
+      // Check if this IP already exists in hosts
+      const existingHost = hosts.find(h => h.ip === trimmedIP);
+      if (existingHost) {
+        setProbeError(`Cette IP (${trimmedIP}) est déjà dans les résultats.`);
+        setIsProbing(false);
+        return;
+      }
+
+      // Add the probed host to the results
+      setHosts(prev => [...prev, probedHost]);
+      setScanComplete(true); // Ensure the table is visible
+      setManualIP(''); // Clear input
+      
+    } catch (error) {
+      setProbeError('Erreur lors du sondage de l\'IP.');
+      console.error('Probe error:', error);
+    } finally {
+      setIsProbing(false);
+    }
+  }, [manualIP, hosts]);
 
   // Module 2: Domain Analyzer Functions
   const analyzeDomainHandler = useCallback(async () => {
@@ -748,10 +867,10 @@ export default function App() {
                 <div>
                   <h2 className="text-lg font-bold text-white flex items-center gap-2">
                     <i className="fas fa-radar text-cyan-400"></i>
-                    Panneau de Contrôle - Scan Réseau
+                    Panneau de Contrôle - Scan Réseau & Sondage Manuel
                   </h2>
                   <p className="text-sm text-gray-400 mt-1">
-                    Lancez un scan complet du réseau local pour découvrir les hôtes actifs.
+                    Lancez un scan complet du réseau local ou sondez une IP spécifique.
                   </p>
                 </div>
 
@@ -779,6 +898,63 @@ export default function App() {
                     <div className="absolute inset-0 rounded-xl bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                   )}
                 </button>
+              </div>
+
+              {/* Manual IP Injection Section */}
+              <div className="mt-6 pt-6 border-t border-gray-800/50">
+                <div className="flex items-center gap-2 mb-3">
+                  <i className="fas fa-crosshairs text-orange-400"></i>
+                  <h3 className="text-sm font-bold text-white">Manual Target Injection</h3>
+                  <span className="text-xs text-gray-500">(Optionnel)</span>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      value={manualIP}
+                      onChange={(e) => {
+                        setManualIP(e.target.value);
+                        setProbeError('');
+                      }}
+                      onKeyDown={(e) => e.key === 'Enter' && probeManualIP()}
+                      placeholder="Ex: 209.17.116.165 ou 192.168.1.50"
+                      className="w-full bg-gray-900/50 border border-gray-700/50 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-orange-500/50 focus:ring-2 focus:ring-orange-500/20 transition-all font-mono text-sm"
+                      disabled={isProbing}
+                    />
+                    <i className="fas fa-bullseye absolute right-4 top-1/2 -translate-y-1/2 text-gray-600"></i>
+                  </div>
+                  <button
+                    onClick={probeManualIP}
+                    disabled={isProbing || !manualIP.trim()}
+                    className={`px-6 py-3 rounded-lg font-bold text-sm uppercase tracking-wider transition-all duration-300 flex items-center gap-2 whitespace-nowrap ${
+                      isProbing || !manualIP.trim()
+                        ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                        : 'bg-gradient-to-r from-orange-500 to-red-600 text-white hover:from-orange-400 hover:to-red-500 hover:scale-105 active:scale-95'
+                    }`}
+                  >
+                    {isProbing ? (
+                      <>
+                        <i className="fas fa-spinner fa-spin"></i>
+                        Sondage...
+                      </>
+                    ) : (
+                      <>
+                        <i className="fas fa-crosshairs text-lg"></i>
+                        🎯 SONDER / AJOUTER L'IP
+                      </>
+                    )}
+                  </button>
+                </div>
+                {probeError && (
+                  <div className="mt-2 flex items-center gap-2 text-sm text-red-400 fade-in">
+                    <i className="fas fa-exclamation-triangle"></i>
+                    {probeError}
+                  </div>
+                )}
+                <p className="mt-2 text-xs text-gray-500">
+                  <i className="fas fa-info-circle mr-1"></i>
+                  Sondez une IP spécifique pour l'ajouter directement aux résultats (utile après analyse DNS du Module 2).
+                </p>
               </div>
 
               {/* Scan Progress */}
@@ -924,12 +1100,12 @@ export default function App() {
                 </div>
                 <h3 className="text-xl font-bold text-gray-300 mb-2">Aucun Scan Effectué</h3>
                 <p className="text-gray-500 text-sm max-w-md mx-auto">
-                  Cliquez sur le bouton "SCANNER LE LAN" pour découvrir les hôtes actifs sur votre réseau local.
+                  Cliquez sur le bouton "SCANNER LE LAN" pour découvrir les hôtes actifs sur votre réseau local, ou utilisez le champ "Manual Target Injection" pour sonder une IP spécifique.
                 </p>
                 <div className="mt-6 flex items-center justify-center gap-4 text-xs text-gray-600">
                   <span className="flex items-center gap-1"><i className="fas fa-lock"></i> Chiffré</span>
                   <span className="flex items-center gap-1"><i className="fas fa-bolt"></i> Temps réel</span>
-                  <span className="flex items-center gap-1"><i className="fas fa-eye"></i> Monitoring</span>
+                  <span className="flex items-center gap-1"><i className="fas fa-crosshairs"></i> Cible manuelle</span>
                 </div>
               </div>
             )}
